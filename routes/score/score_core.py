@@ -4,6 +4,7 @@ from models import Score, Match, db, Player, Team
 from . import score_bp
 from socket_instance import socketio
 from flask_cors import cross_origin
+from .score_outcomes import get_rule, resolve_result, apply_outcome, OutcomeError
 
 def update_successor_match(successor_match_id, current_match_id, winning_team_id):
     """Updates the successor match with the winning team"""
@@ -74,6 +75,11 @@ def update_score():
 
         print(f"Found match with team1_id={match.team1_id}, team2_id={match.team2_id}")
 
+        # Matches decided without play (e.g. walkover) can't be scored;
+        # reset the outcome to 'normal' via /update-outcome first.
+        if not get_rule(match.outcome)['decided_by_score']:
+            return jsonify({'error': f"Match is decided by {match.outcome}. Reset outcome to 'normal' before updating the score."}), 400
+
         # First, check if scores exist, if not create them
         team1_score_record = Score.query.filter_by(
             match_id=match_id,
@@ -113,13 +119,10 @@ def update_score():
         # Update match final status and winner if final is True
         if final:
             match.is_final = True
-            # Determine winner
-            if team1_score > team2_score:
-                match.winner_team_id = match.team1_id
-            elif team2_score > team1_score:
-                match.winner_team_id = match.team2_id
-            else:
-                match.winner_team_id = None  # Draw
+            # Determine winner (None for a draw)
+            match.winner_team_id = resolve_result(
+                match.team1_id, match.team2_id, team1_score, team2_score, match.outcome
+            )['winner']
             print(f"Match finalized with winner_team_id: {match.winner_team_id}")
 
             if match.successor:
@@ -137,12 +140,14 @@ def update_score():
             'team2_id': match.team2_id,
             'team2_score': team2_score,
             'is_final': match.is_final,
-            'tournament_id': tournament_id
+            'tournament_id': tournament_id,
+            'outcome': match.outcome,
+            'winner_team_id': match.winner_team_id
         }
 
         # Emit WebSocket event with the updated scores
         socketio.emit('score_update', response, namespace='/scores')
-        
+
         print(f"\nSending response: {response}")
         return jsonify(response), 200
 
@@ -155,6 +160,53 @@ def update_score():
         print(traceback.format_exc())
         db.session.rollback()
         return jsonify({'error': str(e)}), 500
+
+@score_bp.route('/update-outcome', methods=['POST'])
+def update_outcome():
+    """
+    Set how a match was decided without play, e.g.
+    {"match_id": 12, "tournament_id": 3, "outcome": "walkover", "winner_team_id": "T1"}
+    Send outcome "normal" to undo it and score the match normally.
+    """
+    data = request.get_json() or {}
+    match_id = data.get('match_id')
+    tournament_id = data.get('tournament_id')
+    if not match_id or not tournament_id or not data.get('outcome'):
+        return jsonify({'error': 'match_id, tournament_id and outcome are required'}), 400
+
+    match = Match.query.filter_by(id=match_id, tournament_id=tournament_id).first()
+    if not match:
+        return jsonify({'error': 'Match not found'}), 404
+
+    try:
+        apply_outcome(match, data['outcome'], data.get('winner_team_id'))
+    except OutcomeError as e:
+        return jsonify({'error': str(e)}), 400
+
+    try:
+        # Move the winner into the next knockout match (this also commits)
+        if match.winner_team_id and match.successor:
+            update_successor_match(match.successor, match.id, match.winner_team_id)
+        else:
+            db.session.commit()
+    except Exception as e:
+        db.session.rollback()
+        return jsonify({'error': str(e)}), 500
+
+    response = {
+        'message': 'Match outcome updated successfully',
+        'match_id': match_id,  # echo as sent, like update_score, so live listeners can match it
+        'tournament_id': tournament_id,
+        'team1_id': match.team1_id,
+        'team2_id': match.team2_id,
+        'outcome': match.outcome,
+        'winner_team_id': match.winner_team_id,
+        'is_final': match.is_final,
+        'status': match.status
+    }
+    # Same event as score updates so live screens refresh
+    socketio.emit('score_update', response, namespace='/scores')
+    return jsonify(response), 200
 
 @score_bp.route('/team-score', methods=['GET'])
 def get_team_score():
@@ -274,9 +326,10 @@ def get_match_score():
             },
             'status': match.status,
             'is_final': match.is_final,
-            'winner_team_id': match.winner_team_id
+            'winner_team_id': match.winner_team_id,
+            'outcome': match.outcome
         }
-        
+
         return jsonify(response), 200
         
     except Exception as e:
