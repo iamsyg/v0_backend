@@ -5,6 +5,7 @@ from datetime import datetime
 import csv
 import io
 from . import tournament_bp
+from routes.score.score_outcomes import get_rule
 
 @tournament_bp.route('/export-tournament-csv', methods=['GET'])
 def export_tournament_csv():
@@ -43,6 +44,8 @@ def export_tournament_csv():
         for match in matches:
             if not match.is_final:
                 continue  # Skip matches that are not finalized
+            if not get_rule(match.outcome)['reportable']:
+                continue  # Skip matches not played on court (e.g. walkover) - no rating data
 
             # Fetch teams for each match
             team1 = Team.query.filter_by(team_id=match.team1_id).first()

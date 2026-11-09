@@ -312,7 +312,9 @@ def get_pool_matches():
             },
             'court_number': match.court_number,
             'court_order': match.court_order,
-            'status': match.status
+            'status': match.status,
+            'outcome': match.outcome,
+            'winner_team_id': match.winner_team_id
         })
     
     return jsonify({
@@ -380,7 +382,9 @@ def get_court_matches(tournament_id):
             },
             'court_number': match.court_number,
             'court_order': match.court_order,
-            'status': match.status
+            'status': match.status,
+            'outcome': match.outcome,
+            'winner_team_id': match.winner_team_id
         })
     
     return jsonify({

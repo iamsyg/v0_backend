@@ -1,6 +1,7 @@
 from flask import request, jsonify
 from models import Tournament, Team, Player, Match, Score, Round, db
 from routes.tournament.tournament_core import show_standings
+from routes.score.score_outcomes import resolve_result
 from . import round_bp
 
 def get_round_standings(tournament_id, round_id):
@@ -27,14 +28,25 @@ def get_round_standings(tournament_id, round_id):
             if match.pool not in pool_standings:
                 pool_standings[match.pool] = {}
 
-            # Get scores for this match
-            match_scores = [s for s in scores if s.match_id == match.id]
-            
-            for score in match_scores:
-                if score.team_id not in pool_standings[match.pool]:
-                    team = Team.query.get(score.team_id)
-                    pool_standings[match.pool][score.team_id] = {
-                        'team_id': score.team_id,
+            # Get scores for this match: {team_id: score}
+            match_scores = {s.team_id: s.score for s in scores if s.match_id == match.id}
+
+            # Winner and credited points come from the shared outcome rules
+            result = resolve_result(match.team1_id, match.team2_id,
+                                    match_scores.get(match.team1_id), match_scores.get(match.team2_id),
+                                    match.outcome, match.winner_team_id)
+            sides = [
+                (match.team1_id, result['team1_points'], result['team2_points']),
+                (match.team2_id, result['team2_points'], result['team1_points']),
+            ]
+
+            for team_id, points_scored, points_lost in sides:
+                if team_id not in match_scores:
+                    continue
+                if team_id not in pool_standings[match.pool]:
+                    team = Team.query.get(team_id)
+                    pool_standings[match.pool][team_id] = {
+                        'team_id': team_id,
                         'name': team.name if team else 'Unknown',
                         'total_scores': 0,
                         'points_scored': 0,
@@ -44,19 +56,12 @@ def get_round_standings(tournament_id, round_id):
                         'matches_won': 0
                     }
 
-                team_stats = pool_standings[match.pool][score.team_id]
-                team_stats['points_scored'] += score.score
+                team_stats = pool_standings[match.pool][team_id]
+                team_stats['points_scored'] += points_scored
+                team_stats['points_lost'] += points_lost
                 team_stats['matches_played'].add(match.id)
-
-                # Find opponent's score
-                opponent_score = next(
-                    (s for s in match_scores if s.team_id != score.team_id),
-                    None
-                )
-                if opponent_score:
-                    team_stats['points_lost'] += opponent_score.score
-                    if score.score > opponent_score.score:
-                        team_stats['matches_won'] += 1
+                if result['winner'] == team_id:
+                    team_stats['matches_won'] += 1
 
                 team_stats['total_scores'] = team_stats['matches_won']
                 team_stats['points_difference'] = (
